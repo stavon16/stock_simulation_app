@@ -85,24 +85,20 @@ def show_cpi_countdown():
 
 @st.cache_data(ttl=86400)
 def fetch_macro_data():
-    """直接從 FRED CSV 獲取數據，避開相容性錯誤"""
     try:
+        # 直接連結 FRED CSV 網址，不需透過 pandas_datareader
         cpi_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL"
         ppi_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=PPIFIS"
         df_cpi = pd.read_csv(cpi_url, index_col='DATE', parse_dates=True)
         df_ppi = pd.read_csv(ppi_url, index_col='DATE', parse_dates=True)
         
-        # 計算 YoY 年增率
         cpi_yoy = df_cpi['CPIAUCSL'].pct_change(12).iloc[-1] * 100
         ppi_yoy = df_ppi['PPIFIS'].pct_change(12).iloc[-1] * 100
         prev_cpi = df_cpi['CPIAUCSL'].pct_change(12).iloc[-2] * 100
         
-        status, bias = (
-            ("🟢 通膨降溫中", 1.1) if cpi_yoy < prev_cpi 
-            else ("🔴 通膨升溫中", 0.9)
-        )
+        status, bias = ("🟢 通膨降溫中", 1.1) if cpi_yoy < prev_cpi else ("🔴 通膨升溫中", 0.9)
         return cpi_yoy, ppi_yoy, status, bias
-    except Exception:
+    except:
         return 0.0, 0.0, "數據讀取失敗", 1.0
 
 
