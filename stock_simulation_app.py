@@ -9,17 +9,15 @@ Created on Tue Jan 13 21:43:33 2026
 import datetime
 import numpy as np
 import pandas as pd
-import pandas_datareader.data as web
 import streamlit as st
 import yfinance as yf
 
 # --- 1. 樣式與配置 ---
-# 根據 Streamlit 規範，此指令必須置於除了導入以外的首行
 st.set_page_config(layout="wide", page_title="Invest.Log | 總經量化全維度決策系統")
 
 
 def apply_aesthetic_style():
-    """套用自定義 CSS 樣式"""
+    """套用專業配色與自定義 UI 樣式"""
     st.markdown("""
         <style>
         .stApp { background-color: #FAF9F6; color: #264653; }
@@ -49,27 +47,23 @@ def apply_aesthetic_style():
     """, unsafe_allow_html=True)
 
 
-# --- 2. 總經與倒數計時工具 ---
+# --- 2. 總經與倒數模組 ---
 
 def get_next_cpi_date():
-    """
-    計算下一次美國 CPI 公佈日期（預設為每月 13 號）。
-    """
+    """推算下一次美國 CPI 公佈日期"""
     today = datetime.date.today()
+    # 假設公佈日為每月 13 號
     current_month_cpi = datetime.date(today.year, today.month, 13)
     if today <= current_month_cpi:
         return current_month_cpi
     else:
-        # 處理跨年月份
         month = 1 if today.month == 12 else today.month + 1
         year = today.year + 1 if today.month == 12 else today.year
         return datetime.date(year, month, 13)
 
 
 def show_cpi_countdown():
-    """
-    在 UI 頂部顯示 CPI 公佈倒數。
-    """
+    """顯示 CPI 公佈倒數提醒"""
     next_date = get_next_cpi_date()
     days_left = (next_date - datetime.date.today()).days
     if days_left == 0:
@@ -91,42 +85,36 @@ def show_cpi_countdown():
 
 @st.cache_data(ttl=86400)
 def fetch_macro_data():
-    """
-    從 FRED 抓取總經數據並判定趨勢。
-    """
+    """直接從 FRED CSV 獲取數據，避開相容性錯誤"""
     try:
-        start = datetime.datetime.now() - datetime.timedelta(days=365 * 2)
-        end = datetime.datetime.now()
-        df = web.DataReader(['CPIAUCSL', 'PPIFIS'], 'fred', start, end)
-        df_yoy = df.pct_change(12) * 100
-        latest_cpi = df_yoy['CPIAUCSL'].iloc[-1]
-        latest_ppi = df_yoy['PPIFIS'].iloc[-1]
-        prev_cpi = df_yoy['CPIAUCSL'].iloc[-2]
+        cpi_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL"
+        ppi_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=PPIFIS"
+        df_cpi = pd.read_csv(cpi_url, index_col='DATE', parse_dates=True)
+        df_ppi = pd.read_csv(ppi_url, index_col='DATE', parse_dates=True)
+        
+        # 計算 YoY 年增率
+        cpi_yoy = df_cpi['CPIAUCSL'].pct_change(12).iloc[-1] * 100
+        ppi_yoy = df_ppi['PPIFIS'].pct_change(12).iloc[-1] * 100
+        prev_cpi = df_cpi['CPIAUCSL'].pct_change(12).iloc[-2] * 100
+        
         status, bias = (
-            ("🟢 通膨降溫中", 1.1) if latest_cpi < prev_cpi
+            ("🟢 通膨降溫中", 1.1) if cpi_yoy < prev_cpi 
             else ("🔴 通膨升溫中", 0.9)
         )
-        return latest_cpi, latest_ppi, status, bias
-    except Exception as e:
-        return 0.0, 0.0, f"數據讀取失敗: {e}", 1.0
+        return cpi_yoy, ppi_yoy, status, bias
+    except Exception:
+        return 0.0, 0.0, "數據讀取失敗", 1.0
 
 
-# --- 3. 核心量化分析類別 ---
+# --- 3. 核心量化引擎 ---
 
 class MultiStockAnalyzer:
-    """
-    處理股票數據抓取與技術指標計算。
-    """
-
     def __init__(self, tickers, macro_bias=1.0):
         self.tickers = tickers
-        self.data = {}
-        self.metrics = {}
-        self.names = {}
+        self.data, self.metrics, self.names = {}, {}, {}
         self.macro_bias = macro_bias
 
     def load_data(self, period="1y"):
-        """抓取 yfinance 數據並計算指標。"""
         for t in self.tickers:
             try:
                 stock = yf.Ticker(t)
@@ -135,13 +123,11 @@ class MultiStockAnalyzer:
                 if not df.empty:
                     df.index = df.index.tz_localize(None)
                     df['Daily_Ret'] = df['Close'].pct_change()
-                    # 布林通道與均線
                     df['MA20'] = df['Close'].rolling(20).mean()
                     df['STD20'] = df['Close'].rolling(20).std()
                     df['Lower_Band'] = df['MA20'] - (df['STD20'] * 2)
                     df['Upper_Band'] = df['MA20'] + (df['STD20'] * 2)
                     df['MA5'] = df['Close'].rolling(5).mean()
-                    # RSI
                     delta = df['Close'].diff()
                     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
                     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -151,139 +137,128 @@ class MultiStockAnalyzer:
                 continue
 
     def calculate_metrics(self):
-        """依據指標判定信號。"""
         for t, df in self.data.items():
             recent = df.tail(252)
             curr_p = df['Close'].iloc[-1]
             rsi_val = round(df['RSI'].iloc[-1], 1)
             buy_p = round((df['Lower_Band'].iloc[-1] * 0.6) + (df['MA5'].iloc[-1] * 0.4), 2)
             sell_p = round(df['Upper_Band'].iloc[-1], 2)
-            
-            # 夏普值計算
             vol = recent['Daily_Ret'].std()
             sharpe = (recent['Daily_Ret'].mean() * 252) / (vol * np.sqrt(252)) if vol != 0 else 0
             
-            # 信號邏輯
             dist = (curr_p - buy_p) / buy_p
             if rsi_val < 35.0:
-                sig, col = " 💎 底部黃金區", "#E76F51"
+                sig, col = " 💎  底部黃金區", "#E76F51"
             elif dist <= 0.02:
-                sig, col = " 🔥 買點現蹤", "#E76F51"
+                sig, col = " 🔥  買點現蹤", "#E76F51"
             elif rsi_val > 70.0:
-                sig, col = " ⚠️ 超漲警戒區", "#264653"
+                sig, col = " ⚠️  超漲警戒區", "#264653"
             elif (sell_p - curr_p) / curr_p <= 0.02:
-                sig, col = " 🎯 到達賣點", "#2A9D8F"
+                sig, col = " 🎯  到達賣點", "#2A9D8F"
             else:
-                sig, col = " 💤 伺機而動", "#8D99AE"
+                sig, col = " 💤  伺機而動", "#8D99AE"
 
             self.metrics[t] = {
                 '公司名稱': self.names.get(t, t),
                 '總報酬率': (df['Close'].iloc[-1] / df['Close'].iloc[0]) - 1,
-                '夏普值': sharpe,
-                '現價': round(curr_p, 2),
-                'RSI': rsi_val,
-                '建議買價': buy_p,
-                '建議賣價': sell_p,
-                '預期空間': f"{(sell_p - curr_p) / curr_p:.1%}",
-                '信號': sig,
-                'Color': col
+                '夏普值': sharpe, '現價': round(curr_p, 2), 'RSI': rsi_val,
+                '建議買價': buy_p, '建議賣價': sell_p, '預期空間': f"{(sell_p - curr_p) / curr_p:.1%}",
+                '信號': sig, 'Color': col
             }
 
     def get_matrix(self):
-        """產出決策矩陣 DataFrame。"""
         if not self.metrics:
             return pd.DataFrame()
         res = pd.DataFrame(self.metrics).T
-        # 評分邏輯
         max_s = res['夏普值'].max() if res['夏普值'].max() > 0 else 1
         max_r = res['總報酬率'].max() if res['總報酬率'].max() > 0 else 1
-        res['得分'] = (
-            (res['夏普值'] / max_s * 50) + (res['總報酬率'] / max_r * 50)
-        ) * self.macro_bias
+        res['得分'] = ((res['夏普值'] / max_s * 50) + (res['總報酬率'] / max_r * 50)) * self.macro_bias
         return res.sort_values('得分', ascending=False)
 
 
-# --- 4. 應用程式主介面 ---
+# --- 4. 主介面 ---
 
 def main():
     apply_aesthetic_style()
     st.title("Invest.Log | 總經量化全維度決策系統")
-    
     show_cpi_countdown()
     l_cpi, l_ppi, m_status, m_bias = fetch_macro_data()
 
     with st.sidebar:
-        st.header("📊 投資組合")
-        tickers_input = st.text_input("輸入代碼 (以逗號分隔)", "2330.TW, 2454.TW, TSLA, NVDA")
-        p_map = {"1年": "1y", "3年": "3y", "5年": "5y"}
-        sel_p = st.selectbox("分析區間", list(p_map.keys()), index=0)
-        run_btn = st.button("啟動分析")
+        st.header("📊 投資組合配置")
+        tickers = st.text_input("輸入代碼", "2330.TW, 2454.TW, TSLA, NVDA")
+        
+        # 恢復所有時間選項
+        p_map = {
+            "3個月": "3mo", 
+            "半年": "6mo", 
+            "一年": "1y", 
+            "三年": "3y", 
+            "五年": "5y"
+        }
+        sel_p = st.selectbox("資料時間區間", list(p_map.keys()), index=2)
+        run_btn = st.button("啟動全維度分析")
 
     st.markdown(f"""
         <div class="macro-box">
-            <h4>🌍 總體經濟看板</h4>
+            <h4>🌍 總體經濟環境看板</h4>
             最新 CPI: <b>{l_cpi:.2f}%</b> | 最新 PPI: <b>{l_ppi:.2f}%</b><br>
             趨勢判定：{m_status}
         </div>
     """, unsafe_allow_html=True)
 
     if run_btn:
-        ticker_list = [t.strip() for t in tickers_input.split(',')]
-        analyzer = MultiStockAnalyzer(ticker_list, m_bias)
-        
-        with st.spinner("數據分析中，請稍候..."):
+        analyzer = MultiStockAnalyzer([t.strip() for t in tickers.split(',')], m_bias)
+        with st.spinner("計算中..."):
             analyzer.load_data(p_map[sel_p])
             analyzer.calculate_metrics()
             df = analyzer.get_matrix()
-
+        
         if not df.empty:
-            st.subheader("🎯 優先推薦標的")
+            st.subheader("🎯 優先推薦標的技術診斷")
             cols = st.columns(3)
             for i, (idx, row) in enumerate(df.head(3).iterrows()):
                 with cols[i % 3]:
                     st.markdown(f"""
                         <div class="recommendation-card">
                             <h3>{row['公司名稱']}</h3>
-                            <div class="entry-signal" style="background-color:{row['Color']}22; color:{row['Color']}">
-                                {row['信號']}
-                            </div><br>
-                            建議買價: <b>{row['建議買價']}</b><br>
-                            建議賣價: <b>{row['建議賣價']}</b>
+                            <div class="entry-signal" style="background-color:{row['Color']}22; color:{row['Color']}">{row['信號']}</div>
+                            <p class="price-label">🔴 買價: {row['建議買價']}</p>
+                            <p class="price-label">🟢 賣價: {row['建議賣價']}</p>
                         </div>
                     """, unsafe_allow_html=True)
 
             st.subheader("📊 核心決策矩陣")
-            cols_to_show = ['公司名稱', '得分', '信號', '建議買價', '建議賣價', '現價', 'RSI', '夏普值']
-            st.dataframe(
-                df[cols_to_show].style.background_gradient(subset=['得分'], cmap='YlGnBu'),
-                use_container_width=True
-            )
+            st.dataframe(df[['公司名稱', '得分', '信號', '建議買價', '建議賣價', '現價', 'RSI', '夏普值']]
+                         .style.background_gradient(subset=['得分'], cmap='YlGnBu'), 
+                         use_container_width=True)
 
-            st.markdown("### 🔍 系統信號快速對照表")
-            st.table(pd.DataFrame({
-                "信號名稱": ["💎 底部黃金區", "🔥 買點現蹤", "🎯 到達賣點", "⚠️ 超漲警戒區", "💤 伺機而動"],
-                "觸發邏輯": ["RSI < 35", "貼近支撐位", "貼近壓力位", "RSI > 70", "常態震盪"],
-                "建議動作": ["分批佈局", "高品質進場", "獲利了結", "嚴禁追高", "耐心觀望"]
-            }))
-
-        # 深度決策手冊
-        with st.expander("📖 深度決策手冊：買賣建議與指標說明"):
+        with st.expander("  📖  深度決策手冊：買賣建議與指標說明"):
             st.markdown("---")
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("""
-                ### 📥 進場與定價邏輯
-                * **建議買價**: 布林下軌 (-2σ) 與 5 日均線加權。
-                * **買入判定**: `💎 底部區` (恐慌) 或 `🔥 買點現蹤` (支撐)。
+                ###  📥  進場與定價邏輯
+                * **建議買價 (Support)**: 基於布林下軌 (-2σ) 與 5 日均線加權計算。
+                * **買入信號判定**: 
+                    * ` 💎  底部區`: RSI < 35，代表市場恐慌。
+                    * ` 🔥  買點現蹤`: 現價貼近統計支撐。
                 """)
             with c2:
                 st.markdown("""
-                ### 📤 出場與定價邏輯
-                * **建議賣價**: 以布林上軌 (+2σ) 為目標。
-                * **賣出判定**: `⚠️ 超漲區` (過熱) 或 `🎯 到達賣點` (目標)。
+                ###  📤  出場與定價邏輯
+                * **建議賣價 (Resistance)**: 以布林上軌 (+2σ) 為目標。
+                * **賣出信號判定**: 
+                    * ` ⚠️  超漲區`: RSI > 70，情緒過熱。
+                    * ` 🎯  到達賣點`: 觸及預設獲利目標。
                 """)
-            st.info("💡 操作核心：當標的得分 > 70 且夏普值 > 1 時，若出現買入信號，通常為高品質投資契機。")
-
+            st.markdown("---")
+            st.markdown("""
+            ###  🌍  總體經濟指標 (CPI & PPI)
+            * **CPI**: 消費者物價指數，決定利率走向與市場評價。
+            * **PPI**: 生產者物價指數，決定企業成本與毛利擴張空間。
+            """)
+            st.info(" 💡 **操作核心**：當標的得分 > 70 且夏普值 > 1 時，若出現買入信號，通常為高品質投資契機。")
 
 if __name__ == "__main__":
     main()
