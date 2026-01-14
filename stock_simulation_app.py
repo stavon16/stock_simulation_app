@@ -5,26 +5,17 @@ Created on Tue Jan 13 21:43:33 2026
 @author: 88690
 """
 # streamlit run stock_simulation_app.py
-
-"""
-Invest.Log | 總經量化全維度決策系統
-- 恢復 3個月/半年 選項
-- 修正 matplotlib 表格顏色報錯
-- 將深度決策手冊置於核心決策矩陣下方
-"""
-
 import datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+import urllib.request
 
 # --- 1. 樣式與配置 ---
 st.set_page_config(layout="wide", page_title="Invest.Log | 總經量化全維度決策系統")
 
-
 def apply_aesthetic_style():
-    """套用專業配色與自定義 UI 樣式"""
     st.markdown("""
         <style>
         .stApp { background-color: #FAF9F6; color: #264653; }
@@ -46,17 +37,44 @@ def apply_aesthetic_style():
             font-size: 1.1rem; font-weight: bold; padding: 5px 12px;
             border-radius: 5px; margin: 8px 0; display: inline-block;
         }
-        .price-label { font-size: 1rem; font-weight: bold; margin-bottom: 2px; }
-        .buy-price { color: #E76F51; }
-        .sell-price { color: #2A9D8F; }
         </style>
     """, unsafe_allow_html=True)
 
+# --- 2. 總經數據抓取優化版 ---
 
-# --- 2. 總經與倒數模組 ---
+@st.cache_data(ttl=86400)
+def fetch_macro_data():
+    """使用模擬瀏覽器標頭抓取 FRED 數據，解決 0.00% 讀取失敗問題"""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
+    def get_fred_data(series_id):
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req) as response:
+            return pd.read_csv(response, index_col='DATE', parse_dates=True)
+
+    try:
+        df_cpi = get_fred_data('CPIAUCSL')
+        df_ppi = get_fred_data('PPIFIS')
+        
+        # 計算 YoY (年增率)
+        cpi_yoy = df_cpi['CPIAUCSL'].pct_change(12).iloc[-1] * 100
+        ppi_yoy = df_ppi['PPIFIS'].pct_change(12).iloc[-1] * 100
+        prev_cpi = df_cpi['CPIAUCSL'].pct_change(12).iloc[-2] * 100
+        
+        if cpi_yoy < prev_cpi:
+            status, bias = "🟢 通膨降溫中 (有利市場)", 1.1
+        else:
+            status, bias = "🔴 通膨升溫中 (注意風險)", 0.9
+            
+        return cpi_yoy, ppi_yoy, status, bias
+    except Exception as e:
+        # 如果還是失敗，提供靜態數據提示或報錯
+        return 0.0, 0.0, f"數據連結受阻，請稍後再試", 1.0
+
+# (中間的 get_next_cpi_date, show_cpi_countdown, MultiStockAnalyzer 類別保持不變...)
 
 def get_next_cpi_date():
-    """推算下一次美國 CPI 公佈日期"""
     today = datetime.date.today()
     current_month_cpi = datetime.date(today.year, today.month, 13)
     if today <= current_month_cpi:
@@ -66,9 +84,7 @@ def get_next_cpi_date():
         year = today.year + 1 if today.month == 12 else today.year
         return datetime.date(year, month, 13)
 
-
 def show_cpi_countdown():
-    """顯示 CPI 公佈倒數提醒"""
     next_date = get_next_cpi_date()
     days_left = (next_date - datetime.date.today()).days
     if days_left == 0:
@@ -77,31 +93,6 @@ def show_cpi_countdown():
         st.markdown(f'<div class="countdown-box">🔔 距離美國 CPI 公佈僅剩 {days_left} 天。</div>', unsafe_allow_html=True)
     else:
         st.markdown(f'<div class="countdown-box">📊 距離下一次美國 CPI 公佈還有 {days_left} 天</div>', unsafe_allow_html=True)
-
-
-@st.cache_data(ttl=86400)
-def fetch_macro_data():
-    """直接從 FRED CSV 獲取數據，避免相容性錯誤"""
-    try:
-        cpi_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL"
-        ppi_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=PPIFIS"
-        df_cpi = pd.read_csv(cpi_url, index_col='DATE', parse_dates=True)
-        df_ppi = pd.read_csv(ppi_url, index_col='DATE', parse_dates=True)
-        
-        cpi_yoy = df_cpi['CPIAUCSL'].pct_change(12).iloc[-1] * 100
-        ppi_yoy = df_ppi['PPIFIS'].pct_change(12).iloc[-1] * 100
-        prev_cpi = df_cpi['CPIAUCSL'].pct_change(12).iloc[-2] * 100
-        
-        status, bias = (
-            ("🟢 通膨降溫中", 1.1) if cpi_yoy < prev_cpi 
-            else ("🔴 通膨升溫中", 0.9)
-        )
-        return cpi_yoy, ppi_yoy, status, bias
-    except Exception:
-        return 0.0, 0.0, "數據讀取失敗", 1.0
-
-
-# --- 3. 核心量化分析 ---
 
 class MultiStockAnalyzer:
     def __init__(self, tickers, macro_bias=1.0):
@@ -123,14 +114,12 @@ class MultiStockAnalyzer:
                     df['Lower_Band'] = df['MA20'] - (df['STD20'] * 2)
                     df['Upper_Band'] = df['MA20'] + (df['STD20'] * 2)
                     df['MA5'] = df['Close'].rolling(5).mean()
-                    # RSI 計算
                     delta = df['Close'].diff()
                     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
                     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
                     df['RSI'] = 100 - (100 / (1 + (gain / loss)))
                     self.data[t] = df
-            except Exception:
-                continue
+            except: continue
 
     def calculate_metrics(self):
         for t, df in self.data.items():
@@ -161,9 +150,8 @@ class MultiStockAnalyzer:
         res = pd.DataFrame(self.metrics).T
         max_s = res['夏普值'].max() if res['夏普值'].max() > 0 else 1
         max_r = res['總報酬率'].max() if res['總報酬率'].max() > 0 else 1
-        res['得分'] = ((res['夏普值'] / max_s * 50) + (res['總報酬率'] / max_r * 50)) * self.macro_bias
+        res['得分'] = ((res['夏普值']/max_s * 50) + (res['總報酬率']/max_r * 50)) * self.macro_bias
         return res.sort_values('得分', ascending=False)
-
 
 # --- 4. 主流程 ---
 
@@ -190,9 +178,8 @@ def main():
 
     if run_btn:
         analyzer = MultiStockAnalyzer([t.strip() for t in tickers.split(',')], m_bias)
-        with st.spinner("數據計算中..."):
-            analyzer.load_data(p_map[sel_p])
-            analyzer.calculate_metrics()
+        with st.spinner("數據分析中..."):
+            analyzer.load_data(p_map[sel_p]); analyzer.calculate_metrics()
             df = analyzer.get_matrix()
         
         if not df.empty:
@@ -204,8 +191,7 @@ def main():
                         <div class="recommendation-card">
                             <h3>{row['公司名稱']}</h3>
                             <div class="entry-signal" style="background-color:{row['Color']}22; color:{row['Color']}">{row['信號']}</div>
-                            <p class="price-label">🔴 買價: {row['建議買價']}</p>
-                            <p class="price-label">🟢 賣價: {row['建議賣價']}</p>
+                            <p>🔴 買價: {row['建議買價']} | 🟢 賣價: {row['建議賣價']}</p>
                         </div>
                     """, unsafe_allow_html=True)
 
@@ -214,7 +200,7 @@ def main():
                          .style.background_gradient(subset=['得分'], cmap='YlGnBu'), 
                          use_container_width=True)
 
-            # --- D. 深度決策手冊 (置於矩陣下方) ---
+            # --- D. 深度決策手冊 (緊接在矩陣下方) ---
             with st.expander("  📖  深度決策手冊：買賣建議與指標說明", expanded=True):
                 st.markdown("---")
                 c1, c2 = st.columns(2)
@@ -241,13 +227,6 @@ def main():
                 * **PPI**: 生產者物價指數，決定企業成本與毛利擴張空間。
                 """)
                 st.info(" 💡 **操作核心**：當標的得分 > 70 且夏普值 > 1 時，若出現買入信號，通常為高品質投資契機。")
-
-            st.markdown("### 🔍 系統信號快速對照表")
-            st.table(pd.DataFrame({
-                "信號名稱": [" 💎 底部黃金區", " 🔥 買點現蹤", " 🎯 到達賣點", " ⚠️ 超漲警戒區", " 💤 伺機而動"],
-                "觸發邏輯": ["RSI < 35", "貼近建議買價", "貼近建議賣價", "RSI > 70", "中性區間"],
-                "建議動作": ["分批佈局", "高品質進場", "獲利了結", "嚴禁追高", "耐心觀望"]
-            }))
 
 if __name__ == "__main__":
     main()
